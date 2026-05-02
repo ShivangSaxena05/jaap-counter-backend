@@ -36,12 +36,9 @@ const db = admin.firestore();
 // --- Auto Model Selection ---
 
 const FREE_MODELS = [
-  'openrouter/free',                          // ← Auto-picks any working free model
-  'google/gemma-3-27b-it:free',               // 429 = exists, just rate limited
-  'meta-llama/llama-3.3-70b-instruct:free',   // 429 = exists, just rate limited
-  'qwen/qwen3-8b:free',
-  'nvidia/llama-3.1-nemotron-ultra-253b-v1:free',
-  'arcee-ai/trinity-large-preview:free',
+  'tencent/hy3-preview:free',
+  'openrouter/free',
+  'google/gemini-2.0-flash-lite-001',
 ];
 
 let activeModel = null;
