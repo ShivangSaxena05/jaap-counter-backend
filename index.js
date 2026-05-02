@@ -93,15 +93,37 @@ async function getWorkingModel(apiKey) {
 
 app.get('/api/debug/openrouter', async (req, res) => {
   const key = process.env.OPENROUTER_API_KEY;
-  try {
-    // Force refresh cache
-    activeModel = null;
-    lastModelCheck = null;
-    const model = await getWorkingModel(key);
-    res.json({ success: true, activeModel: model });
-  } catch (err) {
-    res.json({ success: false, error: err.message });
+  const results = [];
+
+  for (const model of FREE_MODELS) {
+    try {
+      await axios.post('https://openrouter.ai/api/v1/chat/completions', {
+        model,
+        messages: [{ role: 'user', content: 'Hi' }],
+        max_tokens: 5
+      }, {
+        headers: {
+          'Authorization': `Bearer ${key}`,
+          'Content-Type': 'application/json',
+          'HTTP-Referer': 'https://render.com',
+          'X-Title': 'Jaap Counter'
+        },
+        timeout: 8000
+      });
+
+      results.push({ model, status: '✅ WORKS' });
+
+    } catch (err) {
+      results.push({
+        model,
+        status: '❌ FAILED',
+        httpStatus: err.response?.status,
+        error: err.response?.data?.error?.message || err.message
+      });
+    }
   }
+
+  res.json(results);
 });
 
 // --- AI Chat Endpoint ---
