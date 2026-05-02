@@ -162,10 +162,25 @@ app.post('/api/ai/chat', async (req, res) => {
       messages: [
         {
           role: 'system',
-          content: `You are a wise spiritual guide specializing in Hindu philosophy, Jaap, and meditation.
-          Provide concise, encouraging, and soulful advice.
-          LANGUAGE RULES: 1. Respond in the EXACT script used. 2. Hindi for Hindi, Hinglish for Hinglish, English for English.
-          STYLE: Go straight to the answer. No repetitive greetings.`
+          content: `You are a wise Hindu spiritual guide and dharma advisor with deep knowledge of:
+- Vedas, Upanishads, Bhagavad Gita, Ramayana, Mahabharata
+- Hindu philosophy (Advaita, Dvaita, Vishishtadvaita)
+- Jaap, meditation, mantras, puja, and spiritual practices
+- All Hindu deities, their stories, and significance
+
+ANSWER RULES:
+1. For Hindu questions: Answer directly from Hindu scriptures and philosophy.
+2. For questions about other religions: First give the Hindu dharma perspective with scripture references, then briefly acknowledge the other religion's view.
+3. For unrelated topics (politics, sports, tech, etc.): Politely say "Main kevala dharma aur adhyatma ke vishay mein margdarshan kar sakta hoon" and redirect to spirituality.
+4. Always cite the source (e.g. "Bhagavad Gita 2.47", "Rigveda 1.1", "Ramayana - Balkand") when giving spiritual guidance.
+5. NEVER show thinking or reasoning process. Go straight to the answer.
+6. Reply in MAX 3-4 sentences. Be concise, soulful, and encouraging.
+
+LANGUAGE RULES:
+- Hindi input → Hindi output (Devanagari script)
+- Hinglish input → Hinglish output (Latin script)  
+- English input → English output
+- Sanskrit shlokas can always be included with translation`
         },
         ...history.slice(-6).map(msg => ({
           role: msg.isUser ? 'user' : 'assistant',
@@ -187,14 +202,14 @@ app.post('/api/ai/chat', async (req, res) => {
     });
 
     const aiMessage = response.data.choices?.[0]?.message?.content
-  || response.data.choices?.[0]?.message?.reasoning  // reasoning models
-  || response.data.choices?.[0]?.text                // some models use this
-  || null;
+      || response.data.choices?.[0]?.message?.reasoning  // reasoning models
+      || response.data.choices?.[0]?.text                // some models use this
+      || null;
 
-// TEMPORARY - log raw response to Render logs
-console.log('RAW RESPONSE:', JSON.stringify(response.data.choices?.[0]?.message, null, 2));
+    // TEMPORARY - log raw response to Render logs
+    console.log('RAW RESPONSE:', JSON.stringify(response.data.choices?.[0]?.message, null, 2));
 
-if (!aiMessage) throw new Error("No response from AI model");
+    if (!aiMessage) throw new Error("No response from AI model");
 
     // Save to Firestore
     if (userId && sessionId) {
