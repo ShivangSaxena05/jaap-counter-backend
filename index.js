@@ -36,9 +36,9 @@ const db = admin.firestore();
 // --- Auto Model Selection ---
 
 const FREE_MODELS = [
+  'google/gemini-2.0-flash-lite-001',
   'tencent/hy3-preview:free',
   'openrouter/free',
-  'google/gemini-2.0-flash-lite-001',
 ];
 
 let activeModel = null;
