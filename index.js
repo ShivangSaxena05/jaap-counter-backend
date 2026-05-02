@@ -186,8 +186,15 @@ app.post('/api/ai/chat', async (req, res) => {
       timeout: 15000
     });
 
-    const aiMessage = response.data.choices?.[0]?.message?.content;
-    if (!aiMessage) throw new Error("No response from AI model");
+    const aiMessage = response.data.choices?.[0]?.message?.content
+  || response.data.choices?.[0]?.message?.reasoning  // reasoning models
+  || response.data.choices?.[0]?.text                // some models use this
+  || null;
+
+// TEMPORARY - log raw response to Render logs
+console.log('RAW RESPONSE:', JSON.stringify(response.data.choices?.[0]?.message, null, 2));
+
+if (!aiMessage) throw new Error("No response from AI model");
 
     // Save to Firestore
     if (userId && sessionId) {
