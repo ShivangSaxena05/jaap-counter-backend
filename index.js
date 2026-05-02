@@ -19,10 +19,16 @@ app.use(express.json());
 // On local, you might use a service account file.
 // On Render, you can set FIREBASE_SERVICE_ACCOUNT_JSON as an env var.
 if (process.env.FIREBASE_SERVICE_ACCOUNT_JSON) {
-  const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_JSON);
-  admin.initializeApp({
-    credential: admin.credential.cert(serviceAccount)
-  });
+  try {
+    const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_JSON);
+    admin.initializeApp({
+      credential: admin.credential.cert(serviceAccount)
+    });
+    console.log("Firebase Admin initialized via environment variable");
+  } catch (err) {
+    console.error("Error parsing FIREBASE_SERVICE_ACCOUNT_JSON:", err);
+    admin.initializeApp();
+  }
 } else {
   // Fallback for local development if you have the ADC or default config
   admin.initializeApp();
