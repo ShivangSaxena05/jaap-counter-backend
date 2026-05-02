@@ -11,7 +11,7 @@ const PORT = process.env.PORT || 3000;
 
 // Middleware
 app.use(helmet());
-app.use(cors()); // For production, use: cors({ origin: 'https://your-frontend.com' })
+app.use(cors());
 app.use(morgan('dev'));
 app.use(express.json());
 
@@ -25,7 +25,6 @@ if (process.env.FIREBASE_SERVICE_ACCOUNT_JSON) {
     console.log("Firebase Admin initialized via environment variable");
   } catch (err) {
     console.error("Error parsing FIREBASE_SERVICE_ACCOUNT_JSON:", err);
-    // Attempt fallback
     if (!admin.apps.length) admin.initializeApp();
   }
 } else {
@@ -34,11 +33,81 @@ if (process.env.FIREBASE_SERVICE_ACCOUNT_JSON) {
 
 const db = admin.firestore();
 
-// --- AI Chat Endpoints ---
+// --- Auto Model Selection ---
+
+const FREE_MODELS = [
+  'google/gemini-2.0-flash-exp:free',
+  'google/gemma-3-27b-it:free',
+  'meta-llama/llama-4-maverick:free',
+  'meta-llama/llama-3.3-70b-instruct:free',
+  'deepseek/deepseek-chat-v3-0324:free',
+  'deepseek/deepseek-r1:free',
+];
+
+let activeModel = null;
+let lastModelCheck = null;
+const MODEL_CACHE_DURATION = 30 * 60 * 1000; // 30 minutes
+
+async function getWorkingModel(apiKey) {
+  const now = Date.now();
+
+  // Return cached model if still valid
+  if (activeModel && lastModelCheck && (now - lastModelCheck) < MODEL_CACHE_DURATION) {
+    return activeModel;
+  }
+
+  console.log('🔍 Finding working free model...');
+
+  for (const model of FREE_MODELS) {
+    try {
+      await axios.post('https://openrouter.ai/api/v1/chat/completions', {
+        model,
+        messages: [{ role: 'user', content: 'Hi' }],
+        max_tokens: 5
+      }, {
+        headers: {
+          'Authorization': `Bearer ${apiKey}`,
+          'Content-Type': 'application/json',
+          'HTTP-Referer': 'https://render.com',
+          'X-Title': 'Jaap Counter'
+        },
+        timeout: 8000
+      });
+
+      console.log(`✅ Active model set to: ${model}`);
+      activeModel = model;
+      lastModelCheck = now;
+      return model;
+
+    } catch (err) {
+      const status = err.response?.status;
+      const reason = err.response?.data?.error?.message || err.message;
+      console.log(`❌ ${model} failed (${status}): ${reason}`);
+    }
+  }
+
+  throw new Error('No working free models found. All models are unavailable.');
+}
+
+// --- Debug Route ---
+
+app.get('/api/debug/openrouter', async (req, res) => {
+  const key = process.env.OPENROUTER_API_KEY;
+  try {
+    // Force refresh cache
+    activeModel = null;
+    lastModelCheck = null;
+    const model = await getWorkingModel(key);
+    res.json({ success: true, activeModel: model });
+  } catch (err) {
+    res.json({ success: false, error: err.message });
+  }
+});
+
+// --- AI Chat Endpoint ---
 
 app.post('/api/ai/chat', async (req, res) => {
   try {
-    // 1. Destructure with defaults to prevent crashes
     const { userPrompt, history = [], userId, sessionId } = req.body;
 
     if (!userPrompt) {
@@ -47,13 +116,16 @@ app.post('/api/ai/chat', async (req, res) => {
 
     const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
     if (!OPENROUTER_API_KEY) {
-        console.error("Missing OPENROUTER_API_KEY env var");
-        return res.status(500).json({ error: 'Server configuration error' });
+      console.error("Missing OPENROUTER_API_KEY env var");
+      return res.status(500).json({ error: 'Server configuration error' });
     }
 
-    // 2. OpenRouter Call
+    // Auto-select working model
+    const model = await getWorkingModel(OPENROUTER_API_KEY);
+    console.log(`Using model: ${model}`);
+
     const response = await axios.post('https://openrouter.ai/api/v1/chat/completions', {
-      model: 'google/gemini-2.0-flash-exp:free',
+      model,
       messages: [
         {
           role: 'system',
@@ -62,15 +134,11 @@ app.post('/api/ai/chat', async (req, res) => {
           LANGUAGE RULES: 1. Respond in the EXACT script used. 2. Hindi for Hindi, Hinglish for Hinglish, English for English.
           STYLE: Go straight to the answer. No repetitive greetings.`
         },
-        // Ensure history is sliced safely
         ...history.slice(-6).map(msg => ({
           role: msg.isUser ? 'user' : 'assistant',
           content: msg.text
         })),
-        {
-          role: 'user',
-          content: userPrompt
-        }
+        { role: 'user', content: userPrompt }
       ],
       max_tokens: 500,
       temperature: 0.7,
@@ -79,7 +147,7 @@ app.post('/api/ai/chat', async (req, res) => {
         'Accept': 'application/json',
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${OPENROUTER_API_KEY}`,
-        'HTTP-Referer': 'https://render.com', // Required by some OpenRouter models
+        'HTTP-Referer': 'https://render.com',
         'X-Title': 'Jaap Counter'
       },
       timeout: 15000
@@ -88,12 +156,11 @@ app.post('/api/ai/chat', async (req, res) => {
     const aiMessage = response.data.choices?.[0]?.message?.content;
     if (!aiMessage) throw new Error("No response from AI model");
 
-    // 3. Save to Firestore (Async - don't block the response)
+    // Save to Firestore
     if (userId && sessionId) {
       const sessionRef = db.collection('users').doc(userId).collection('ai_sessions').doc(sessionId);
-      
-      // Update session metadata
       const sessionDoc = await sessionRef.get();
+
       if (!sessionDoc.exists) {
         await sessionRef.set({
           title: userPrompt.length > 40 ? userPrompt.substring(0, 37) + '...' : userPrompt,
@@ -106,62 +173,27 @@ app.post('/api/ai/chat', async (req, res) => {
         });
       }
 
-      // Add messages to subcollection
       const messagesRef = sessionRef.collection('messages');
-      await messagesRef.add({
-        text: userPrompt,
-        isUser: true,
-        timestamp: admin.firestore.FieldValue.serverTimestamp()
-      });
-      await messagesRef.add({
-        text: aiMessage,
-        isUser: false,
-        timestamp: admin.firestore.FieldValue.serverTimestamp()
-      });
+      await messagesRef.add({ text: userPrompt, isUser: true, timestamp: admin.firestore.FieldValue.serverTimestamp() });
+      await messagesRef.add({ text: aiMessage, isUser: false, timestamp: admin.firestore.FieldValue.serverTimestamp() });
     }
 
-    res.json({ content: aiMessage });
+    res.json({ content: aiMessage, model });
+
   } catch (error) {
-    // Better logging for debugging Render logs
+    // Reset cache so next request retries model selection
+    activeModel = null;
+    lastModelCheck = null;
+
     console.error('AI Chat Error:', error.response?.data || error.message);
-    res.status(500).json({ 
-        error: 'Failed to get spiritual advice',
-        details: error.message 
+    res.status(500).json({
+      error: 'Failed to get spiritual advice',
+      details: error.response?.data?.error?.message || error.message
     });
   }
 });
 
-// TEMPORARY DEBUG ROUTE - remove after fixing
-app.get('/api/debug/openrouter', async (req, res) => {
-  const key = process.env.OPENROUTER_API_KEY;
-  
-  try {
-    const response = await axios.post('https://openrouter.ai/api/v1/chat/completions', {
-      model: 'mistralai/mistral-7b-instruct:free',
-      messages: [{ role: 'user', content: 'Say hello' }],
-      max_tokens: 10
-    }, {
-      headers: {
-        'Authorization': `Bearer ${key}`,
-        'Content-Type': 'application/json',
-        'HTTP-Referer': 'https://render.com',
-        'X-Title': 'Jaap Counter'
-      }
-    });
-    res.json({ success: true, response: response.data });
-  } catch (err) {
-    res.json({
-      keyLoaded: !!key,
-      keyPrefix: key?.substring(0, 12),
-      keyLength: key?.length,
-      status: err.response?.status,
-      // This is the actual OpenRouter error message
-      openRouterError: err.response?.data  
-    });
-  }
-});
-
-// ... (Keep the rest of your get/delete endpoints as they are)
+// ... (Keep the rest of your get/delete endpoints here)
 
 app.listen(PORT, () => {
   console.log(`Backend server running on port ${PORT}`);
