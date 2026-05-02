@@ -36,12 +36,12 @@ const db = admin.firestore();
 // --- Auto Model Selection ---
 
 const FREE_MODELS = [
-  'google/gemini-2.0-flash-exp:free',
-  'google/gemma-3-27b-it:free',
-  'meta-llama/llama-4-maverick:free',
-  'meta-llama/llama-3.3-70b-instruct:free',
-  'deepseek/deepseek-chat-v3-0324:free',
-  'deepseek/deepseek-r1:free',
+  'openrouter/free',                          // ← Auto-picks any working free model
+  'google/gemma-3-27b-it:free',               // 429 = exists, just rate limited
+  'meta-llama/llama-3.3-70b-instruct:free',   // 429 = exists, just rate limited
+  'qwen/qwen3-8b:free',
+  'nvidia/llama-3.1-nemotron-ultra-253b-v1:free',
+  'arcee-ai/trinity-large-preview:free',
 ];
 
 let activeModel = null;
@@ -51,12 +51,13 @@ const MODEL_CACHE_DURATION = 30 * 60 * 1000; // 30 minutes
 async function getWorkingModel(apiKey) {
   const now = Date.now();
 
-  // Return cached model if still valid
   if (activeModel && lastModelCheck && (now - lastModelCheck) < MODEL_CACHE_DURATION) {
     return activeModel;
   }
 
   console.log('🔍 Finding working free model...');
+
+  let rateLimitedModel = null; // fallback if all others fail
 
   for (const model of FREE_MODELS) {
     try {
@@ -83,7 +84,20 @@ async function getWorkingModel(apiKey) {
       const status = err.response?.status;
       const reason = err.response?.data?.error?.message || err.message;
       console.log(`❌ ${model} failed (${status}): ${reason}`);
+
+      // 429 = rate limited but model EXISTS — save as fallback
+      if (status === 429 && !rateLimitedModel) {
+        rateLimitedModel = model;
+      }
     }
+  }
+
+  // If everything failed but some were just rate limited, use that
+  if (rateLimitedModel) {
+    console.log(`⚠️ Using rate-limited fallback: ${rateLimitedModel}`);
+    activeModel = rateLimitedModel;
+    lastModelCheck = now;
+    return rateLimitedModel;
   }
 
   throw new Error('No working free models found. All models are unavailable.');
