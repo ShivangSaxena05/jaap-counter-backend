@@ -131,6 +131,36 @@ app.post('/api/ai/chat', async (req, res) => {
   }
 });
 
+// TEMPORARY DEBUG ROUTE - remove after fixing
+app.get('/api/debug/openrouter', async (req, res) => {
+  const key = process.env.OPENROUTER_API_KEY;
+  
+  try {
+    const response = await axios.post('https://openrouter.ai/api/v1/chat/completions', {
+      model: 'mistralai/mistral-7b-instruct:free',
+      messages: [{ role: 'user', content: 'Say hello' }],
+      max_tokens: 10
+    }, {
+      headers: {
+        'Authorization': `Bearer ${key}`,
+        'Content-Type': 'application/json',
+        'HTTP-Referer': 'https://render.com',
+        'X-Title': 'Jaap Counter'
+      }
+    });
+    res.json({ success: true, response: response.data });
+  } catch (err) {
+    res.json({
+      keyLoaded: !!key,
+      keyPrefix: key?.substring(0, 12),
+      keyLength: key?.length,
+      status: err.response?.status,
+      // This is the actual OpenRouter error message
+      openRouterError: err.response?.data  
+    });
+  }
+});
+
 // ... (Keep the rest of your get/delete endpoints as they are)
 
 app.listen(PORT, () => {
