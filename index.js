@@ -2,11 +2,20 @@ const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
 const morgan = require('morgan');
+const rateLimit = require('express-rate-limit');
 require('dotenv').config();
 const admin = require('firebase-admin');
 const axios = require('axios');
 
 const app = express();
+
+// --- Utility: Input Sanitization ---
+const sanitizeText = (text) => {
+  // Remove potentially harmful HTML/script tags and trim whitespace
+  return String(text)
+    .replace(/<[^>]*>/g, '')
+    .trim();
+};
 const PORT = process.env.PORT || 3000;
 
 // Middleware
@@ -14,6 +23,15 @@ app.use(helmet());
 app.use(cors());
 app.use(morgan('dev'));
 app.use(express.json());
+
+// --- Rate Limiting ---
+const chatLimiter = rateLimit({
+  windowMs: 60 * 1000, // 1 minute
+  max: 10, // 10 requests per minute
+  message: { error: 'Too many requests, please try again later' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
 
 // Initialize Firebase Admin
 if (process.env.FIREBASE_SERVICE_ACCOUNT_JSON) {
@@ -33,6 +51,20 @@ if (process.env.FIREBASE_SERVICE_ACCOUNT_JSON) {
 
 const db = admin.firestore();
 
+// --- Firebase ID Token Verification Middleware ---
+
+const verifyToken = async (req, res, next) => {
+  const token = req.headers.authorization?.split('Bearer ')[1];
+  if (!token) return res.status(401).json({ error: 'Unauthorized' });
+  try {
+    const decoded = await admin.auth().verifyIdToken(token);
+    req.uid = decoded.uid;
+    next();
+  } catch {
+    res.status(403).json({ error: 'Invalid token' });
+  }
+};
+
 // --- Auto Model Selection ---
 
 const FREE_MODELS = [
@@ -42,6 +74,10 @@ const FREE_MODELS = [
   'openrouter/free',
 ];
 
+// NOTE: activeModel and lastModelCheck are module-level globals.
+// On multi-process deployments (PM2, cluster, Render instances with multiple workers),
+// each worker maintains independent state, causing redundant model-probing on cold starts.
+// For production deployments with multiple processes, consider using Redis for shared state.
 let activeModel = null;
 let lastModelCheck = null;
 const MODEL_CACHE_DURATION = 30 * 60 * 1000; // 30 minutes
@@ -101,51 +137,61 @@ async function getWorkingModel(apiKey) {
   throw new Error('No working free models found. All models are unavailable.');
 }
 
-// --- Debug Route ---
+// --- Debug Route (Development Only) ---
 
-app.get('/api/debug/openrouter', async (req, res) => {
-  const key = process.env.OPENROUTER_API_KEY;
-  const results = [];
+if (process.env.NODE_ENV !== 'production') {
+  app.get('/api/debug/openrouter', async (req, res) => {
+    const key = process.env.OPENROUTER_API_KEY;
+    const results = [];
 
-  for (const model of FREE_MODELS) {
-    try {
-      await axios.post('https://openrouter.ai/api/v1/chat/completions', {
-        model,
-        messages: [{ role: 'user', content: 'Hi' }],
-        max_tokens: 5
-      }, {
-        headers: {
-          'Authorization': `Bearer ${key}`,
-          'Content-Type': 'application/json',
-          'HTTP-Referer': 'https://render.com',
-          'X-Title': 'Jaap Counter'
-        },
-        timeout: 8000
-      });
+    for (const model of FREE_MODELS) {
+      try {
+        await axios.post('https://openrouter.ai/api/v1/chat/completions', {
+          model,
+          messages: [{ role: 'user', content: 'Hi' }],
+          max_tokens: 5
+        }, {
+          headers: {
+            'Authorization': `Bearer ${key}`,
+            'Content-Type': 'application/json',
+            'HTTP-Referer': 'https://render.com',
+            'X-Title': 'Jaap Counter'
+          },
+          timeout: 8000
+        });
 
-      results.push({ model, status: '✅ WORKS' });
+        results.push({ model, status: '✅ WORKS' });
 
-    } catch (err) {
-      results.push({
-        model,
-        status: '❌ FAILED',
-        httpStatus: err.response?.status,
-        error: err.response?.data?.error?.message || err.message
-      });
+      } catch (err) {
+        results.push({
+          model,
+          status: '❌ FAILED',
+          httpStatus: err.response?.status,
+          error: err.response?.data?.error?.message || err.message
+        });
+      }
     }
-  }
 
-  res.json(results);
-});
+    res.json(results);
+  });
+}
 
 // --- AI Chat Endpoint ---
 
-app.post('/api/ai/chat', async (req, res) => {
+app.post('/api/ai/chat', chatLimiter, verifyToken, async (req, res) => {
   try {
-    const { userPrompt, history = [], userId, sessionId } = req.body;
+    const { userPrompt, history = [], sessionId } = req.body;
+    
+    // Use req.uid from verified token, not userId from request body
+    const userId = req.uid;
 
     if (!userPrompt) {
       return res.status(400).json({ error: 'User prompt is required' });
+    }
+
+    // Validate prompt length (max 2000 chars)
+    if (userPrompt.length > 2000) {
+      return res.status(400).json({ error: 'Prompt too long (max 2000 characters)' });
     }
 
     const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
@@ -157,6 +203,12 @@ app.post('/api/ai/chat', async (req, res) => {
     // Auto-select working model
     const model = await getWorkingModel(OPENROUTER_API_KEY);
     console.log(`Using model: ${model}`);
+
+    // Ensure history contains complete conversation pairs (even length)
+    const safeHistory = history.slice(-6);
+    const pairedHistory = safeHistory.length % 2 === 0 
+      ? safeHistory 
+      : safeHistory.slice(1); // drop orphaned first message if odd
 
     const response = await axios.post('https://openrouter.ai/api/v1/chat/completions', {
       model,
@@ -250,7 +302,7 @@ SECTION 5 — TONE
 - Never be preachy or repetitive within a single response.
 - A wise Guru knows when to speak and when to stay brief.`
 },
-        ...history.slice(-6).map(msg => ({
+        ...pairedHistory.map(msg => ({
           role: msg.isUser ? 'user' : 'assistant',
           content: msg.text
         })),
@@ -274,46 +326,56 @@ SECTION 5 — TONE
       || response.data.choices?.[0]?.text                // some models use this
       || null;
 
-    // TEMPORARY - log raw response to Render logs
-    console.log('RAW RESPONSE:', JSON.stringify(response.data.choices?.[0]?.message, null, 2));
-
     if (!aiMessage) throw new Error("No response from AI model");
 
-    // Save to Firestore with atomic updates
+    // Save to Firestore with atomic batch writes
     if (userId && sessionId) {
       const sessionRef = db.collection('users').doc(userId).collection('ai_sessions').doc(sessionId);
+      const messagesRef = sessionRef.collection('messages');
+      
       const sessionDoc = await sessionRef.get();
+      const now = admin.firestore.FieldValue.serverTimestamp();
+      const batch = db.batch();
 
       if (!sessionDoc.exists) {
-        // Create new session if it doesn't exist
-        await sessionRef.set({
+        // Sanitize title to prevent stored XSS
+        const sanitizedTitle = sanitizeText(userPrompt);
+        const displayTitle = sanitizedTitle.length > 40 ? sanitizedTitle.substring(0, 37) + '...' : sanitizedTitle;
+        
+        // Create new session in batch
+        batch.set(sessionRef, {
           id: sessionId,
           sessionId: sessionId,
-          title: userPrompt.length > 40 ? userPrompt.substring(0, 37) + '...' : userPrompt,
-          createdAt: admin.firestore.FieldValue.serverTimestamp(),
-          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-          lastMessageAt: admin.firestore.FieldValue.serverTimestamp()
+          title: displayTitle,
+          createdAt: now,
+          updatedAt: now,
+          lastMessageAt: now
         });
       } else {
-        // Update existing session with new timestamp
-        await sessionRef.update({
-          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-          lastMessageAt: admin.firestore.FieldValue.serverTimestamp()
+        // Update existing session in batch
+        batch.update(sessionRef, {
+          updatedAt: now,
+          lastMessageAt: now
         });
       }
 
-      // Append messages to session
-      const messagesRef = sessionRef.collection('messages');
-      await messagesRef.add({ text: userPrompt, isUser: true, timestamp: admin.firestore.FieldValue.serverTimestamp() });
-      await messagesRef.add({ text: aiMessage, isUser: false, timestamp: admin.firestore.FieldValue.serverTimestamp() });
+      // Add both messages to batch for atomic write
+      batch.set(messagesRef.doc(), { text: userPrompt, isUser: true, timestamp: now });
+      batch.set(messagesRef.doc(), { text: aiMessage, isUser: false, timestamp: now });
+
+      // Commit all writes atomically
+      await batch.commit();
     }
 
     res.json({ content: aiMessage, model });
 
   } catch (error) {
-    // Reset cache so next request retries model selection
-    activeModel = null;
-    lastModelCheck = null;
+    // Only reset model cache on model-specific or rate-limit errors.
+    // Do NOT reset on Firestore errors or other unrelated failures.
+    if (error.message?.includes('model') || error.response?.status === 429) {
+      activeModel = null;
+      lastModelCheck = null;
+    }
 
     console.error('AI Chat Error:', error.response?.data || error.message);
     res.status(500).json({
@@ -325,12 +387,17 @@ SECTION 5 — TONE
 
 // --- Get All Sessions for User (sorted by most recent) ---
 
-app.get('/api/ai/sessions/:userId', async (req, res) => {
+app.get('/api/ai/sessions/:userId', verifyToken, async (req, res) => {
   try {
     const { userId } = req.params;
 
     if (!userId) {
       return res.status(400).json({ error: 'User ID is required' });
+    }
+
+    // Verify that the authenticated user matches the userId
+    if (req.uid !== userId) {
+      return res.status(403).json({ error: 'Unauthorized: userId mismatch' });
     }
 
     const sessionsSnapshot = await db.collection('users')
@@ -364,12 +431,17 @@ app.get('/api/ai/sessions/:userId', async (req, res) => {
 
 // --- Get Session History (messages in chronological order) ---
 
-app.get('/api/ai/history/:userId/:sessionId', async (req, res) => {
+app.get('/api/ai/history/:userId/:sessionId', verifyToken, async (req, res) => {
   try {
     const { userId, sessionId } = req.params;
 
     if (!userId || !sessionId) {
       return res.status(400).json({ error: 'User ID and Session ID are required' });
+    }
+
+    // Verify that the authenticated user matches the userId
+    if (req.uid !== userId) {
+      return res.status(403).json({ error: 'Unauthorized: userId mismatch' });
     }
 
     const messagesSnapshot = await db.collection('users')
@@ -401,12 +473,17 @@ app.get('/api/ai/history/:userId/:sessionId', async (req, res) => {
 
 // --- Get Session Details ---
 
-app.get('/api/ai/sessions/:userId/:sessionId', async (req, res) => {
+app.get('/api/ai/sessions/:userId/:sessionId', verifyToken, async (req, res) => {
   try {
     const { userId, sessionId } = req.params;
 
     if (!userId || !sessionId) {
       return res.status(400).json({ error: 'User ID and Session ID are required' });
+    }
+
+    // Verify that the authenticated user matches the userId
+    if (req.uid !== userId) {
+      return res.status(403).json({ error: 'Unauthorized: userId mismatch' });
     }
 
     const sessionDoc = await db.collection('users')
@@ -440,7 +517,7 @@ app.get('/api/ai/sessions/:userId/:sessionId', async (req, res) => {
 
 // --- Delete Session ---
 
-app.delete('/api/ai/sessions/:userId/:sessionId', async (req, res) => {
+app.delete('/api/ai/sessions/:userId/:sessionId', verifyToken, async (req, res) => {
   try {
     const { userId, sessionId } = req.params;
 
@@ -448,23 +525,31 @@ app.delete('/api/ai/sessions/:userId/:sessionId', async (req, res) => {
       return res.status(400).json({ error: 'User ID and Session ID are required' });
     }
 
+    // Verify that the authenticated user matches the userId
+    if (req.uid !== userId) {
+      return res.status(403).json({ error: 'Unauthorized: userId mismatch' });
+    }
+
     const sessionRef = db.collection('users')
       .doc(userId)
       .collection('ai_sessions')
       .doc(sessionId);
 
-    // Delete all messages in the session first
+    // Delete all messages in the session first (in batches of 499)
     const messagesSnapshot = await sessionRef.collection('messages').get();
-    const batch = db.batch();
+    const docs = messagesSnapshot.docs;
 
-    messagesSnapshot.forEach(doc => {
-      batch.delete(doc.ref);
-    });
+    // Process deletions in chunks of 499 to respect Firestore batch limits
+    for (let i = 0; i < docs.length; i += 499) {
+      const batch = db.batch();
+      docs.slice(i, i + 499).forEach(doc => {
+        batch.delete(doc.ref);
+      });
+      await batch.commit();
+    }
 
     // Delete the session document
-    batch.delete(sessionRef);
-
-    await batch.commit();
+    await sessionRef.delete();
 
     res.json({ message: 'Session deleted successfully' });
   } catch (error) {
