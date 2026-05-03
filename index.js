@@ -173,13 +173,6 @@ VIDWAN KE NIYAM:
 5. Doosre dharm ke sawaal par — PEHLE Hindu dharma ka drrishikon aur pramaan do, phir sankshipt mein doosre dharm ka mat batao.
 6. Off-topic sawaal (politics, cricket, tech) par kaho: "Mera karya sirf dharma aur adhyatma mein margdarshan karna hai."
 
-JAWAB KA TARIKA — BILKUL VIDWAN JAISE:
-- Pehle Sanskrit shlok ya shastra vachan do (agar relevant ho)
-- Phir uska arth apni bhasha mein samjhao
-- Phir practical spiritual guidance do
-- Ant mein shastra ka source clearly likho
-- MAX 5-6 sentences. Gambhir, saral, aur dil ko chhu jane wala.
-
 BHASHA NIYAM:
 - Hindi sawaal → Sirf Hindi jawab (Devanagari), koi English translation nahi
 - Hinglish sawaal → Sirf Hinglish jawab (Latin script), koi translation nahi  
@@ -217,23 +210,30 @@ SABSE ZAROORI: Tu ek Vidwan hai, Google nahi. Sirf authentic pramaan-based gyan 
 
     if (!aiMessage) throw new Error("No response from AI model");
 
-    // Save to Firestore
+    // Save to Firestore with atomic updates
     if (userId && sessionId) {
       const sessionRef = db.collection('users').doc(userId).collection('ai_sessions').doc(sessionId);
       const sessionDoc = await sessionRef.get();
 
       if (!sessionDoc.exists) {
+        // Create new session if it doesn't exist
         await sessionRef.set({
+          id: sessionId,
+          sessionId: sessionId,
           title: userPrompt.length > 40 ? userPrompt.substring(0, 37) + '...' : userPrompt,
           createdAt: admin.firestore.FieldValue.serverTimestamp(),
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
           lastMessageAt: admin.firestore.FieldValue.serverTimestamp()
         });
       } else {
+        // Update existing session with new timestamp
         await sessionRef.update({
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
           lastMessageAt: admin.firestore.FieldValue.serverTimestamp()
         });
       }
 
+      // Append messages to session
       const messagesRef = sessionRef.collection('messages');
       await messagesRef.add({ text: userPrompt, isUser: true, timestamp: admin.firestore.FieldValue.serverTimestamp() });
       await messagesRef.add({ text: aiMessage, isUser: false, timestamp: admin.firestore.FieldValue.serverTimestamp() });
@@ -254,7 +254,160 @@ SABSE ZAROORI: Tu ek Vidwan hai, Google nahi. Sirf authentic pramaan-based gyan 
   }
 });
 
-// ... (Keep the rest of your get/delete endpoints here)
+// --- Get All Sessions for User (sorted by most recent) ---
+
+app.get('/api/ai/sessions/:userId', async (req, res) => {
+  try {
+    const { userId } = req.params;
+
+    if (!userId) {
+      return res.status(400).json({ error: 'User ID is required' });
+    }
+
+    const sessionsSnapshot = await db.collection('users')
+      .doc(userId)
+      .collection('ai_sessions')
+      .orderBy('updatedAt', 'desc')
+      .limit(50)
+      .get();
+
+    const sessions = [];
+    sessionsSnapshot.forEach(doc => {
+      sessions.push({
+        id: doc.id,
+        sessionId: doc.id,
+        ...doc.data(),
+        createdAt: doc.data().createdAt?.toDate?.() || doc.data().createdAt,
+        updatedAt: doc.data().updatedAt?.toDate?.() || doc.data().updatedAt,
+        lastMessageAt: doc.data().lastMessageAt?.toDate?.() || doc.data().lastMessageAt
+      });
+    });
+
+    res.json({ sessions });
+  } catch (error) {
+    console.error('Get Sessions Error:', error.message);
+    res.status(500).json({
+      error: 'Failed to fetch sessions',
+      details: error.message
+    });
+  }
+});
+
+// --- Get Session History (messages in chronological order) ---
+
+app.get('/api/ai/history/:userId/:sessionId', async (req, res) => {
+  try {
+    const { userId, sessionId } = req.params;
+
+    if (!userId || !sessionId) {
+      return res.status(400).json({ error: 'User ID and Session ID are required' });
+    }
+
+    const messagesSnapshot = await db.collection('users')
+      .doc(userId)
+      .collection('ai_sessions')
+      .doc(sessionId)
+      .collection('messages')
+      .orderBy('timestamp', 'asc')
+      .get();
+
+    const messages = [];
+    messagesSnapshot.forEach(doc => {
+      messages.push({
+        id: doc.id,
+        ...doc.data(),
+        timestamp: doc.data().timestamp?.toDate?.() || doc.data().timestamp
+      });
+    });
+
+    res.json({ messages });
+  } catch (error) {
+    console.error('Get History Error:', error.message);
+    res.status(500).json({
+      error: 'Failed to fetch session history',
+      details: error.message
+    });
+  }
+});
+
+// --- Get Session Details ---
+
+app.get('/api/ai/sessions/:userId/:sessionId', async (req, res) => {
+  try {
+    const { userId, sessionId } = req.params;
+
+    if (!userId || !sessionId) {
+      return res.status(400).json({ error: 'User ID and Session ID are required' });
+    }
+
+    const sessionDoc = await db.collection('users')
+      .doc(userId)
+      .collection('ai_sessions')
+      .doc(sessionId)
+      .get();
+
+    if (!sessionDoc.exists) {
+      return res.status(404).json({ error: 'Session not found' });
+    }
+
+    const session = {
+      id: sessionDoc.id,
+      sessionId: sessionDoc.id,
+      ...sessionDoc.data(),
+      createdAt: sessionDoc.data().createdAt?.toDate?.() || sessionDoc.data().createdAt,
+      updatedAt: sessionDoc.data().updatedAt?.toDate?.() || sessionDoc.data().updatedAt,
+      lastMessageAt: sessionDoc.data().lastMessageAt?.toDate?.() || sessionDoc.data().lastMessageAt
+    };
+
+    res.json({ session });
+  } catch (error) {
+    console.error('Get Session Error:', error.message);
+    res.status(500).json({
+      error: 'Failed to fetch session',
+      details: error.message
+    });
+  }
+});
+
+// --- Delete Session ---
+
+app.delete('/api/ai/sessions/:userId/:sessionId', async (req, res) => {
+  try {
+    const { userId, sessionId } = req.params;
+
+    if (!userId || !sessionId) {
+      return res.status(400).json({ error: 'User ID and Session ID are required' });
+    }
+
+    const sessionRef = db.collection('users')
+      .doc(userId)
+      .collection('ai_sessions')
+      .doc(sessionId);
+
+    // Delete all messages in the session first
+    const messagesSnapshot = await sessionRef.collection('messages').get();
+    const batch = db.batch();
+
+    messagesSnapshot.forEach(doc => {
+      batch.delete(doc.ref);
+    });
+
+    // Delete the session document
+    batch.delete(sessionRef);
+
+    await batch.commit();
+
+    res.json({ message: 'Session deleted successfully' });
+  } catch (error) {
+    console.error('Delete Session Error:', error.message);
+    res.status(500).json({
+      error: 'Failed to delete session',
+      details: error.message
+    });
+  }
+});
+
+// ... (Keep the rest of your endpoints here)
 
 app.listen(PORT, () => {
   console.log(`Backend server running on port ${PORT}`);
